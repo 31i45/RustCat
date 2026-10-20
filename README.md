@@ -21,8 +21,9 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
 ## Features
 
 - **Live CPU animation** — 5-frame cat animation driven by a Windows PDH
-  performance counter (`\Processor(_Total)\% Processor Time`), smoothed over a
-  rolling window.
+  performance counter (fallback chain: `Processor Information` → `Processor`,
+  `% Processor Utility` → `% Processor Time` on pre-26100 builds), smoothed
+  over a rolling window.
 - **Hover flyout** — hovering the tray icon shows a compact panel with CPU,
   memory and disk activity; per-monitor DPI aware, auto-hides when the cursor
   leaves. Deliberately excludes GPU (no reliable system-wide counter) and
@@ -32,8 +33,8 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
 - **Run at startup** — left-click the tray icon to toggle; confirmed by a
   checked entry in the right-click menu and a permanent second line in the
   tooltip. Stored in the `HKCU` `Run` key, no settings file required.
-- **Featherweight** — a single dependency (the [`windows`](https://crates.io/crates/windows)
-  crate), ~0.16 MiB release binary, pure Win32 message loop. No runtime, no
+- **Featherweight** — a single runtime dependency (the [`windows`](https://crates.io/crates/windows)
+  crate), ~0.18 MiB release binary, pure Win32 message loop. No runtime, no
   scheduler, no polling: everything is timer- and message-driven.
 
 ## How it works
@@ -81,8 +82,8 @@ Exit fully cleans up: tray icon, timers, icons and mutex — no leftovers.
   unwinding machinery.
 - Build-time assertions guard the icon assets against silent drift; the
   guards live in the unit-test suite, so CI runs them.
-- `VS_VERSIONINFO` is hand-assembled in `build.rs` — the Properties dialog
-  shows real metadata with zero external tooling.
+- `VS_VERSIONINFO` is hand-assembled in `build.rs` with zero external tooling
+  (structure verified via PE dump; property-sheet reading is a known open item).
 
 ## Credits
 
