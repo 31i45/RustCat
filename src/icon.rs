@@ -103,10 +103,79 @@ impl Drop for IconSet {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::baked;
+    use png::{ColorType, Decoder};
+    use std::path::Path;
+
     /// 真机探针：图标创建全链路（cargo test -- --ignored --nocapture）。
     #[test]
     #[ignore = "真机手动验证"]
     fn probe_create_icons() {
         assert!(super::IconSet::create().is_some(), "IconSet::create failed");
+    }
+
+    /// ———— 烘焙产物护栏（原 tests/baked_icons.rs，并入 CI 可见的单元测试）————
+
+    fn decode_rgba(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut decoder = Decoder::new(bytes);
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().expect("png info");
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("png frame");
+        assert_eq!(info.color_type, ColorType::Rgba);
+        buf.truncate(info.buffer_size());
+        (info.width, info.height, buf)
+    }
+
+    /// 与 build.rs 同规则的独立重算：RGBA → BGRA。
+    fn to_bgra(rgba: &[u8]) -> Vec<u8> {
+        let mut v = rgba.to_vec();
+        for px in v.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        v
+    }
+
+    #[test]
+    fn five_frames_both_themes() {
+        assert_eq!(baked::FRAME_COUNT, 5);
+        assert_eq!(baked::CAT_ICONS_LIGHT.len(), 5);
+        assert_eq!(baked::CAT_ICONS_DARK.len(), 5);
+    }
+
+    #[test]
+    fn frame_bytes_are_32bpp_raw() {
+        let n = (baked::FRAME_WIDTH * baked::FRAME_HEIGHT * 4) as usize;
+        for f in baked::CAT_ICONS_LIGHT.iter().chain(baked::CAT_ICONS_DARK.iter()) {
+            assert_eq!(f.len(), n, "raw BGRA frame size mismatch");
+        }
+    }
+
+    #[test]
+    fn light_frames_pixel_equal_original_assets() {
+        for (i, baked_bgra) in baked::CAT_ICONS_LIGHT.iter().enumerate() {
+            let path = Path::new("assets/runners/cat").join(format!("cat_{i}.png"));
+            let original = std::fs::read(&path).expect("original png");
+            let (ow, oh, rgba) = decode_rgba(&original);
+            assert_eq!(
+                (ow, oh),
+                (baked::FRAME_WIDTH, baked::FRAME_HEIGHT),
+                "frame {i} size drifted"
+            );
+            assert_eq!(&to_bgra(&rgba), baked_bgra, "frame {i} pixels drifted");
+        }
+    }
+
+    #[test]
+    fn dark_frames_whiten_rgb_and_preserve_alpha() {
+        for (i, dark) in baked::CAT_ICONS_DARK.iter().enumerate() {
+            let light = baked::CAT_ICONS_LIGHT[i];
+            assert_eq!(light.len(), dark.len());
+            for (l, d) in light.chunks_exact(4).zip(dark.chunks_exact(4)) {
+                assert_eq!(&d[0..3], &[255, 255, 255], "frame {i} bgr must be white");
+                assert_eq!(l[3], d[3], "frame {i} alpha must be preserved");
+            }
+        }
     }
 }

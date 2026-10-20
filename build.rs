@@ -48,8 +48,8 @@ fn recolor_white(px: &mut [u8]) {
     }
 }
 
-/// exe 文件图标：assets/rustcat.ico（PNG-in-ICO）→ .res（RT_ICON + RT_GROUP_ICON），
-/// 经 rustc-link-arg 交给 link.exe 写入 PE 资源段。零外部工具（不需要 rc.exe）。
+/// exe 文件图标：assets/rustcat.ico（PNG-in-ICO）→ .res（RT_ICON + RT_GROUP_ICON +
+/// RT_VERSION），经 rustc-link-arg 交给 link.exe 写入 PE 资源段。零外部工具（不需要 rc.exe）。
 fn gen_exe_icon_res(out_dir: &str) {
     println!("cargo:rerun-if-changed=assets/rustcat.ico");
     let ico = fs::read("assets/rustcat.ico").expect("assets/rustcat.ico");
@@ -64,8 +64,8 @@ fn gen_exe_icon_res(out_dir: &str) {
 
     let png = &ico[22..];
     let mut res = Vec::new();
-    push_res_entry(&mut res, 0, 0, 0, &[]); // 空根条目
-    push_res_entry(&mut res, 3, 1, 0x1010, png); // RT_ICON = PNG 载荷
+    push_res_entry(&mut res, 0, 0, 0, 0, &[]); // 空根条目
+    push_res_entry(&mut res, 3, 1, 0x1010, 0, png); // RT_ICON = PNG 载荷
     let mut group = Vec::with_capacity(20);
     group.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved/type/count
     group.extend_from_slice(&[32, 32, 0, 0]); // 宽/高/色数+保留
@@ -73,21 +73,119 @@ fn gen_exe_icon_res(out_dir: &str) {
     group.extend_from_slice(&32u16.to_le_bytes()); // bpp
     group.extend_from_slice(&(png.len() as u32).to_le_bytes()); // bytes in res
     group.extend_from_slice(&1u16.to_le_bytes()); // 引用 RT_ICON id=1
-    push_res_entry(&mut res, 14, 1, 0x1030, &group); // RT_GROUP_ICON
+    push_res_entry(&mut res, 14, 1, 0x1030, 0, &group); // RT_GROUP_ICON
+    push_res_entry(&mut res, 16, 1, 0x1030, 1, &vs_versioninfo()); // RT_VERSION（DataVersion=1）
     let path = Path::new(out_dir).join("rustcat.res");
     fs::write(&path, &res).expect("write rustcat.res");
     println!("cargo:rustc-link-arg-bins={}", path.display());
 }
 
+/// ———— VS_VERSIONINFO（MSDN VS_VERSIONINFO 布局，纯 Rust 构建，零 rc.exe）————
+
+fn push_wstr(buf: &mut Vec<u8>, s: &str) {
+    for u in s.encode_utf16() {
+        buf.extend_from_slice(&u.to_le_bytes());
+    }
+}
+
+fn pad4(buf: &mut Vec<u8>) {
+    while buf.len() % 4 != 0 {
+        buf.push(0);
+    }
+}
+
+/// 通用节点：wLength（整块，含 6 字节头）/ wValueLength / wType / szKey(+pad) / value / children。
+/// 对齐基准含 6 字节头：szKey 后 pad 使 value 落在 4 对齐处；value 必须自身 4 对齐。
+fn make_block(key: &str, value: &[u8], wtype: u16, children: &[u8]) -> Vec<u8> {
+    let mut sz = Vec::new();
+    push_wstr(&mut sz, key);
+    while (6 + sz.len()) % 4 != 0 {
+        sz.push(0);
+    }
+    let total = 6 + sz.len() + value.len() + children.len();
+    let mut b = Vec::with_capacity(total);
+    b.extend_from_slice(&(total as u16).to_le_bytes());
+    b.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    b.extend_from_slice(&wtype.to_le_bytes());
+    b.extend_from_slice(&sz);
+    b.extend_from_slice(value);
+    b.extend_from_slice(children);
+    b
+}
+
+fn push_child(children: &mut Vec<u8>, child: Vec<u8>) {
+    pad4(children);
+    children.extend_from_slice(&child);
+}
+
+/// 字符串条目：value = UTF-16 + NUL，pad 到 4 对齐（wValueLength 为含 NUL 的字节数）。
+fn make_string(key: &str, val: &str) -> Vec<u8> {
+    let mut value = Vec::new();
+    push_wstr(&mut value, val);
+    value.extend_from_slice(&0u16.to_le_bytes());
+    pad4(&mut value);
+    make_block(key, &value, 1, &[])
+}
+
+/// 0.1.0.0 → FileVersion/ProductVersion；VOS_NT_WINDOWS32 + VFT_APP。
+fn vs_versioninfo() -> Vec<u8> {
+    let words: [u32; 13] = [
+        0xFEEF_04BD, // dwSignature
+        0x0001_0000, // dwStrucVersion
+        0,           // dwFileVersionMS
+        1,           // dwFileVersionLS
+        0,           // dwProductVersionMS
+        1,           // dwProductVersionLS
+        0x0000_003F, // dwFileFlagsMask
+        0,           // dwFileFlags
+        0x0004_0004, // dwFileOS = VOS_NT_WINDOWS32
+        1,           // dwFileType = VFT_APP
+        0,           // dwFileSubtype
+        0,           // dwFileDateMS
+        0,           // dwFileDateLS
+    ];
+    let ffi: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+    let mut strings = Vec::new();
+    for (k, v) in [
+        ("CompanyName", "31i45"),
+        ("FileDescription", "A running cat on your taskbar"),
+        ("FileVersion", "0.1.0"),
+        ("InternalName", "rustcat"),
+        ("LegalCopyright", "MIT License"),
+        ("OriginalFilename", "rustcat.exe"),
+        ("ProductName", "RustCat"),
+        ("ProductVersion", "0.1.0"),
+    ] {
+        push_child(&mut strings, make_string(k, v));
+    }
+    let table = make_block("040904b0", &[], 1, &strings); // US English + Unicode
+    let mut sfi = Vec::new();
+    push_child(&mut sfi, table);
+    let sfi = make_block("StringFileInfo", &[], 1, &sfi);
+
+    let mut translation = 0x0409u16.to_le_bytes().to_vec();
+    translation.extend_from_slice(&0x04B0u16.to_le_bytes());
+    let mut vfi = Vec::new();
+    push_child(&mut vfi, make_block("Translation", &translation, 0, &[]));
+    let vfi = make_block("VarFileInfo", &[], 0, &vfi);
+
+    let mut children = Vec::new();
+    push_child(&mut children, sfi);
+    push_child(&mut children, vfi);
+    make_block("VS_VERSION_INFO", &ffi, 0, &children)
+}
+
 /// .res 条目：32 字节头（DataSize/HeaderSize/Type/Name/DataVersion/Flags/Lang/Ver/Char）+ DWORD 对齐数据。
-fn push_res_entry(res: &mut Vec<u8>, rtype: u16, rid: u16, flags: u16, data: &[u8]) {
+/// data_version：RT_VERSION 按惯例为 1，其余为 0。
+fn push_res_entry(res: &mut Vec<u8>, rtype: u16, rid: u16, flags: u16, data_version: u32, data: &[u8]) {
     res.extend_from_slice(&(data.len() as u32).to_le_bytes());
     res.extend_from_slice(&32u32.to_le_bytes()); // header size
     res.extend_from_slice(&0xFFFFu16.to_le_bytes()); // ordinal marker
     res.extend_from_slice(&rtype.to_le_bytes());
     res.extend_from_slice(&0xFFFFu16.to_le_bytes()); // ordinal marker
     res.extend_from_slice(&rid.to_le_bytes());
-    res.extend_from_slice(&0u32.to_le_bytes()); // data version
+    res.extend_from_slice(&data_version.to_le_bytes()); // data version
     res.extend_from_slice(&flags.to_le_bytes()); // memory flags
     res.extend_from_slice(&0x0409u16.to_le_bytes()); // language
     res.extend_from_slice(&0u32.to_le_bytes()); // version

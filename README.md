@@ -2,11 +2,13 @@
 
 A running cat on your taskbar that sprints with your CPU load.
 
+![RustCat running on the taskbar](demo.gif)
+
 [![CI](https://github.com/31i45/RustCat/actions/workflows/ci.yml/badge.svg)](https://github.com/31i45/RustCat/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2B-0078D6.svg)](https://github.com/31i45/RustCat)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![GitHub Stars](https://img.shields.io/github/stars/31i45/RustCat?style=social)](https://github.com/31i45/RustCat/stargazers)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2B-0078D6.svg)](https://github.com/31i45/RustCat)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org)
+[![Stars](https://img.shields.io/github/stars/31i45/RustCat?style=social)](https://github.com/31i45/RustCat/stargazers)
 
 RustCat is a featherweight Windows tray application that keeps a tiny cat running
 in your notification area. The cat's speed follows your CPU load in real time —
@@ -21,11 +23,15 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
 - **Live CPU animation** — 5-frame cat animation driven by a Windows PDH
   performance counter (`\Processor(_Total)\% Processor Time`), smoothed over a
   rolling window.
+- **Hover flyout** — hovering the tray icon shows a compact panel with CPU,
+  memory and disk activity; per-monitor DPI aware, auto-hides when the cursor
+  leaves. Deliberately excludes GPU (no reliable system-wide counter) and
+  network (no frame of reference at a glance).
 - **Theme aware** — black cat on light taskbars, white cat on dark ones;
   follows the system theme live (responds to `WM_SETTINGCHANGE`).
 - **Run at startup** — left-click the tray icon to toggle; confirmed by a
-  checked entry in the right-click menu. Stored in the `HKCU` `Run` key,
-  no settings file required.
+  checked entry in the right-click menu and a permanent second line in the
+  tooltip. Stored in the `HKCU` `Run` key, no settings file required.
 - **Featherweight** — a single dependency (the [`windows`](https://crates.io/crates/windows)
   crate), ~0.16 MiB release binary, pure Win32 message loop. No runtime, no
   scheduler, no polling: everything is timer- and message-driven.
@@ -58,22 +64,25 @@ The executable is at `target/release/rustcat.exe`.
 
 ## Usage
 
-| Action              | Result                                        |
-| ------------------- | --------------------------------------------- |
-| Hover the tray icon | Current CPU load tooltip                      |
-| Left-click          | Toggle *Run at startup* (tooltip confirms)    |
-| Right-click         | Menu: **Run at startup** (✓ = enabled), **Exit** |
+| Action              | Result                                          |
+| ------------------- | ----------------------------------------------- |
+| Hover the tray icon | Flyout: CPU / memory / disk activity            |
+| Left-click          | Toggle *Run at startup* (tooltip second line updates) |
+| Right-click         | Menu: **自启** (✓ = enabled), **退出**           |
 
 Exit fully cleans up: tray icon, timers, icons and mutex — no leftovers.
 
 ## Design notes
 
-- One dependency, one purpose. No GPU, memory, or network meters; no settings
+- One dependency, one purpose. No GPU or network meters; no settings
   UI; no persistence beyond the `Run` key.
 - Single instance enforced by a named mutex.
 - `panic = "abort"`, LTO, `opt-level = "z"` — a static binary with no
   unwinding machinery.
-- Build-time assertions guard the icon assets against silent drift.
+- Build-time assertions guard the icon assets against silent drift; the
+  guards live in the unit-test suite, so CI runs them.
+- `VS_VERSIONINFO` is hand-assembled in `build.rs` — the Properties dialog
+  shows real metadata with zero external tooling.
 
 ## Credits
 

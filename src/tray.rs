@@ -13,6 +13,13 @@ pub struct Tray {
     hwnd: HWND,
 }
 
+impl Tray {
+    /// 托盘图标锚定窗口（浮窗定位与 Shell_NotifyIconGetRect 需要）。
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+}
+
 fn nid(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -66,13 +73,13 @@ impl Tray {
         }
     }
 
-    /// 右键菜单：Run at startup（按当前状态带勾选）+ Exit。每次调用重建，天然反映最新状态。
+    /// 右键菜单：自启（按当前状态勾选）+ 退出。每次调用重建，天然反映最新状态。
     pub fn show_menu(&self, autostart_on: bool) {
         unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
             let flags = if autostart_on { MF_STRING | MF_CHECKED } else { MF_STRING };
-            let _ = AppendMenuW(menu, flags, CMD_AUTOSTART as usize, w!("Run at startup"));
-            let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT as usize, w!("Exit"));
+            let _ = AppendMenuW(menu, flags, CMD_AUTOSTART as usize, w!("自启"));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT as usize, w!("退出"));
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let _ = SetForegroundWindow(self.hwnd); // 焦点修复：否则点菜单外不收起

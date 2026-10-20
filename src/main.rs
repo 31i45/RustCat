@@ -6,8 +6,9 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod autostart;
-mod cpu;
+mod flyout;
 mod icon;
+mod metrics;
 mod speed;
 mod theme;
 mod tray;
@@ -17,42 +18,55 @@ mod baked {
     include!(concat!(env!("OUT_DIR"), "/baked_icons.rs"));
 }
 
-use cpu::{CpuSampler, PdhCounter, system_cpu_sampler};
+use flyout::{Flyout, IDT_HOVER};
 use icon::IconSet;
+use metrics::{cpu_sampler, disk_sampler, disk_activity, memory_pct, PdhCounter, RollingSampler};
 use speed::interval_ms;
 use theme::{Theme, system_theme};
 use tray::{CMD_AUTOSTART, CMD_EXIT, Tray, WM_TRAYICON};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::*;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 const IDT_SAMPLE: usize = 1;
 const IDT_ANIMATE: usize = 2;
 
+/// 主窗口类名（探针共用单一来源，类名改动即全处一致）。
+pub const MAIN_CLASS: PCWSTR = w!("RustCatCoreWnd");
+
 struct App {
-    sampler: CpuSampler<PdhCounter>,
+    sampler: RollingSampler<PdhCounter>,
+    disk: RollingSampler<PdhCounter>,
     tray: Tray,
     icons: IconSet,
     theme: Theme,
     frame: usize,
+    flyout: Flyout,
+    autostart: bool,
 }
 
-fn tooltip_text(load: Option<f64>) -> String {
-    match load {
+/// 常驻双行 tooltip：CPU 一行 + 自启状态一行。状态与右键菜单永远一致，
+/// 左键 toggle 的反馈直接落在第二行，无"1s 后消失"的突兀。
+fn tooltip_text(load: Option<f64>, autostart_on: bool) -> String {
+    let cpu = match load {
         Some(v) => format!("CPU: {v:.1}%"),
         None => "CPU: n/a".to_string(),
-    }
+    };
+    format!("{cpu}\n自启: {}", if autostart_on { "开" } else { "关" })
 }
 
 fn next_frame(i: usize) -> usize {
     (i + 1) % baked::FRAME_COUNT
 }
 
-/// 左键切换自启后的即时反馈；1s 内被 CPU 采样 tooltip 覆盖，短反馈即可。
-fn autostart_tip(on: bool) -> String {
-    if on { "RustCat: autostart ON" } else { "RustCat: autostart OFF" }.to_string()
+/// 浮窗快照：CPU / 内存 / 磁盘，行序 = 心智优先级。数据源见 metrics 模块。
+fn flyout_snapshot(cpu: Option<f64>, disk_idle: Option<f64>) -> [Option<f64>; 3] {
+    [cpu, memory_pct().map(f64::from), disk_activity(disk_idle)]
 }
 
 /// 主题变更广播：lParam 为空（全量广播）或 "ImmersiveColorSet" 时响应。
@@ -73,12 +87,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_TIMER => {
             if wp.0 == IDT_SAMPLE {
                 app.sampler.update();
+                app.disk.update();
                 let load = app.sampler.load();
-                app.tray.set_tooltip(&tooltip_text(load));
+                app.tray.set_tooltip(&tooltip_text(load, app.autostart));
+                app.flyout.refresh(flyout_snapshot(load, app.disk.load()));
                 SetTimer(Some(hwnd), IDT_ANIMATE, load.map_or(500, |v| interval_ms(v) as u32), None);
             } else if wp.0 == IDT_ANIMATE {
                 app.frame = next_frame(app.frame);
                 app.tray.set_icon(app.icons.frame(app.theme, app.frame));
+            } else if wp.0 == IDT_HOVER {
+                if !app.flyout.tick() {
+                    app.flyout.hide();
+                }
             }
             LRESULT(0)
         }
@@ -86,17 +106,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if theme_broadcast(lp) {
                 app.theme = system_theme();
                 app.tray.set_icon(app.icons.frame(app.theme, app.frame));
+                app.flyout.set_dark(app.theme == Theme::Dark);
             }
             LRESULT(0)
         }
         WM_TRAYICON => match lp.0 as u16 {
             // VERSION_4 口径：lParam 低字 = 通知码，wParam 低/高字 = 屏幕坐标
             m if m == WM_RBUTTONUP as u16 || m == WM_CONTEXTMENU as u16 => {
-                app.tray.show_menu(autostart::is_enabled());
+                // 弹层互斥：菜单与浮窗同占图标上方，先收浮窗再开菜单
+                app.flyout.hide();
+                app.tray.show_menu(app.autostart);
                 LRESULT(0)
             }
             m if m == WM_LBUTTONUP as u16 => {
-                app.tray.set_tooltip(&autostart_tip(autostart::toggle()));
+                // 点击 = 意图从浏览切到操作，hover UI 即收（对齐原生托盘惯例）
+                app.flyout.hide();
+                app.autostart = autostart::toggle();
+                app.tray.set_tooltip(&tooltip_text(app.sampler.load(), app.autostart));
+                LRESULT(0)
+            }
+            m if m == WM_MOUSEMOVE as u16 => {
+                app.flyout.show();
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -107,7 +137,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             CMD_AUTOSTART => {
-                app.tray.set_tooltip(&autostart_tip(autostart::toggle()));
+                app.autostart = autostart::toggle();
+                app.tray.set_tooltip(&tooltip_text(app.sampler.load(), app.autostart));
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -122,6 +153,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 fn main() {
     unsafe {
+        // Per-Monitor DPI Aware：托盘 rect / GetCursorPos / 窗口坐标 / GDI 字体全部
+        // 进入同一物理坐标系。缺失它 = 浮窗错位 + 真实悬停被哨兵误杀 + 字体模糊。
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
         // 单实例：互斥体名为 RustCat 产品身份（原版 _RUNCAT_MUTEX，机制等价：唯一常量串即单实例）
         let Ok(_mutex) = CreateMutexW(None, true, w!("_RUSTCAT_MUTEX")) else { return };
         if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -129,7 +164,7 @@ fn main() {
         }
 
         let hinstance = HINSTANCE::from(GetModuleHandleW(None).unwrap_or_default());
-        let class_name = w!("RustCatCoreWnd");
+        let class_name = MAIN_CLASS;
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
@@ -160,7 +195,17 @@ fn main() {
         let Some(icons) = IconSet::create() else { return };
         let theme = system_theme();
         let Some(tray) = Tray::add(hwnd, icons.frame(theme, 0), "RustCat") else { return };
-        let app = Box::new(App { sampler: system_cpu_sampler(), tray, icons, theme, frame: 0 });
+        let tray_hwnd = tray.hwnd(); // struct 字面量先 move tray，先取锚窗
+        let app = Box::new(App {
+            sampler: cpu_sampler(),
+            disk: disk_sampler(),
+            tray,
+            icons,
+            theme,
+            frame: 0,
+            flyout: Flyout::new(hwnd, tray_hwnd, theme == Theme::Dark),
+            autostart: autostart::is_enabled(),
+        });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(app) as isize);
         SetTimer(Some(hwnd), IDT_SAMPLE, 1000, None);
         SetTimer(Some(hwnd), IDT_ANIMATE, 200, None);
@@ -184,22 +229,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tooltip_with_load() {
-        assert_eq!(super::tooltip_text(Some(42.04)), "CPU: 42.0%");
-    }
-    #[test]
-    fn tooltip_without_load() {
-        assert_eq!(super::tooltip_text(None), "CPU: n/a");
+    fn tooltip_two_lines() {
+        assert_eq!(super::tooltip_text(Some(42.04), true), "CPU: 42.0%\n自启: 开");
+        assert_eq!(super::tooltip_text(None, false), "CPU: n/a\n自启: 关");
     }
     #[test]
     fn frame_cycles_modulo_count() {
         assert_eq!(super::next_frame(4), 0);
         assert_eq!(super::next_frame(0), 1);
-    }
-    #[test]
-    fn autostart_tip_reflects_state() {
-        assert_eq!(super::autostart_tip(true), "RustCat: autostart ON");
-        assert_eq!(super::autostart_tip(false), "RustCat: autostart OFF");
     }
 
     /// 真机探针：读取运行中实例的托盘图标屏幕矩形（需先启动 runcat.exe）。
@@ -209,7 +246,7 @@ mod tests {
         use super::*;
         use windows::Win32::UI::Shell::*;
         unsafe {
-            let hwnd = FindWindowW(w!("RustCatCoreWnd"), None).expect("runcat 未运行");
+            let hwnd = FindWindowW(MAIN_CLASS, None).expect("runcat 未运行");
             let id = NOTIFYICONIDENTIFIER {
                 cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
                 hWnd: hwnd,
@@ -276,7 +313,7 @@ mod tests {
     fn probe_exit() {
         use super::*;
         unsafe {
-            let hwnd = FindWindowW(w!("RustCatCoreWnd"), None).expect("runcat 未运行");
+            let hwnd = FindWindowW(MAIN_CLASS, None).expect("runcat 未运行");
             let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
         }
     }
@@ -287,7 +324,7 @@ mod tests {
     fn probe_autostart() {
         use super::*;
         unsafe {
-            let hwnd = FindWindowW(w!("RustCatCoreWnd"), None).expect("rustcat 未运行");
+            let hwnd = FindWindowW(MAIN_CLASS, None).expect("rustcat 未运行");
             let before = autostart::is_enabled();
             // VERSION_4 口径：lParam 低字 = WM_LBUTTONUP；左键 toggle
             let left = |h: HWND| {
@@ -303,6 +340,66 @@ mod tests {
             println!("RESTORED={}", autostart::is_enabled() == before);
             assert_eq!(autostart::is_enabled(), before, "还原失败");
             let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
+        }
+    }
+
+    /// 真机探针：光标悬停图标 → 浮窗可见 → 光标移远 → 哨兵隐藏 → 复原退出。
+    #[test]
+    #[ignore = "真机手动验证"]
+    fn probe_flyout() {
+        use super::*;
+        use windows::Win32::UI::Shell::*;
+        unsafe {
+            // 测试进程同样声明 DPI Aware：否则 GetRect/GetWindowRect 返回虚拟化坐标，
+            // 测量失真（物理 360 宽被读成 240、中心 2129 被读成 1419）。
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let hwnd = FindWindowW(MAIN_CLASS, None).expect("rustcat 未运行");
+            let id = NOTIFYICONIDENTIFIER {
+                cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+                hWnd: hwnd,
+                uID: 1,
+                ..Default::default()
+            };
+            let rect = Shell_NotifyIconGetRect(&id).ok();
+            if let Some(r) = rect {
+                println!("ANCHOR=({},{},{},{})", r.left, r.top, r.right, r.bottom);
+            }
+            let anchor = rect.expect("GetRect");
+            let mut orig = POINT::default();
+            let _ = GetCursorPos(&mut orig);
+            // show() 现在有光标实况守卫：必须先把真实光标驻留到图标中心，再发消息
+            let _ = SetCursorPos((anchor.left + anchor.right) / 2, (anchor.top + anchor.bottom) / 2);
+            let _ = PostMessageW(Some(hwnd), WM_TRAYICON, WPARAM(0), LPARAM(WM_MOUSEMOVE as isize));
+            std::thread::sleep(std::time::Duration::from_millis(60)); // 等主进程分发 show()
+            let fly = FindWindowW(w!("RustCatFlyout"), None).expect("浮窗未创建");
+            // 把光标驻留到浮窗自身中心保活（>250ms 后哨兵以浮窗 rect 判定存续）
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(fly, &mut wr);
+            println!("FLYOUT_RECT=({},{},{},{})", wr.left, wr.top, wr.right, wr.bottom);
+            let _ = SetCursorPos((wr.left + wr.right) / 2, (wr.top + wr.bottom) / 2);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let visible = IsWindowVisible(fly).as_bool();
+            println!("FLYOUT_VISIBLE={visible}");
+            assert!(visible, "mousemove 后浮窗应可见");
+            let _ = SetCursorPos(10, 10);
+            std::thread::sleep(std::time::Duration::from_millis(700)); // > 250ms 哨兵周期
+            let hidden = !IsWindowVisible(fly).as_bool();
+            println!("FLYOUT_HIDDEN={hidden}");
+            assert!(hidden, "光标离开后浮窗应隐藏");
+            let _ = SetCursorPos(orig.x, orig.y); // 复原用户光标
+            let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(1), LPARAM(0));
+        }
+    }
+
+    /// 真机探针：验证 DPI 感知声明是否生效（决定浮窗坐标系是否统一）。
+    #[test]
+    #[ignore = "真机手动验证"]
+    fn probe_dpi() {
+        use windows::Win32::UI::HiDpi::*;
+        unsafe {
+            let r = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            println!("SETCTX={r:?}");
+            println!("SYS_DPI={}", GetDpiForSystem());
         }
     }
 
@@ -338,7 +435,17 @@ mod tests {
             let icons = IconSet::create().expect("icons");
             let theme = system_theme();
             let tray = Tray::add(hwnd, icons.frame(theme, 0), "probe").expect("tray");
-            let app = Box::new(App { sampler: system_cpu_sampler(), tray, icons, theme, frame: 0 });
+            let tray_hwnd = tray.hwnd();
+            let app = Box::new(App {
+                sampler: cpu_sampler(),
+                disk: RollingSampler::new(None),
+                tray,
+                icons,
+                theme,
+                frame: 0,
+                flyout: Flyout::new(hwnd, tray_hwnd, false),
+                autostart: false,
+            });
             let raw = Box::into_raw(app);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw as isize);
             SetTimer(Some(hwnd), IDT_SAMPLE, 1000, None);
