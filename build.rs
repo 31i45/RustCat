@@ -132,10 +132,10 @@ fn vs_versioninfo() -> Vec<u8> {
     let words: [u32; 13] = [
         0xFEEF_04BD, // dwSignature
         0x0001_0000, // dwStrucVersion
-        0,           // dwFileVersionMS
-        1,           // dwFileVersionLS
-        0,           // dwProductVersionMS
-        1,           // dwProductVersionLS
+        0x0001_0000, // dwFileVersionMS = 1.0
+        0,           // dwFileVersionLS = 0.0
+        0x0001_0000, // dwProductVersionMS = 1.0
+        0,           // dwProductVersionLS = 0.0
         0x0000_003F, // dwFileFlagsMask
         0,           // dwFileFlags
         0x0004_0004, // dwFileOS = VOS_NT_WINDOWS32
@@ -150,12 +150,12 @@ fn vs_versioninfo() -> Vec<u8> {
     for (k, v) in [
         ("CompanyName", "31i45"),
         ("FileDescription", "A running cat on your taskbar"),
-        ("FileVersion", "0.1.0"),
+        ("FileVersion", "1.0.0"),
         ("InternalName", "rustcat"),
         ("LegalCopyright", "MIT License"),
         ("OriginalFilename", "rustcat.exe"),
         ("ProductName", "RustCat"),
-        ("ProductVersion", "0.1.0"),
+        ("ProductVersion", "1.0.0"),
     ] {
         push_child(&mut strings, make_string(k, v));
     }
