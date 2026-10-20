@@ -1,0 +1,33 @@
+[package]
+name = "rustcat"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+description = "A running cat on your taskbar that sprints with your CPU load."
+license = "MIT"
+
+[dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Performance",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+] }
+
+[build-dependencies]
+png = "0.17"
+
+[dev-dependencies]
+png = "0.17"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
