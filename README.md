@@ -2,7 +2,7 @@
 
 A running cat on your taskbar that sprints with your CPU load.
 
-![RustCat running on the taskbar](demo.gif)
+![RustCat running on the taskbar](demo1.gif)
 
 [![CI](https://github.com/31i45/RustCat/actions/workflows/ci.yml/badge.svg)](https://github.com/31i45/RustCat/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -29,7 +29,6 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
   cursor leaves. Deliberately excludes GPU (no reliable system-wide counter) and
   network (no frame of reference at a glance).
 
-  ![Flyout: CPU / memory / disk](demo1.gif)
   ![Flyout detail](demo2.gif)
 - **Theme aware** — black cat on light taskbars, white cat on dark ones;
   follows the system theme live (responds to `WM_SETTINGCHANGE`).
