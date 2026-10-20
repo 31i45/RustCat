@@ -24,10 +24,13 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
   performance counter (fallback chain: `Processor Information` → `Processor`,
   `% Processor Utility` → `% Processor Time` on pre-26100 builds), smoothed
   over a rolling window.
-- **Hover flyout** — hovering the tray icon shows a compact panel with CPU,
-  memory and disk activity; per-monitor DPI aware, auto-hides when the cursor
-  leaves. Deliberately excludes GPU (no reliable system-wide counter) and
+- **Hover flyout** — hovering the tray icon shows a compact panel with **CPU**,
+  **memory** and **disk** activity; per-monitor DPI aware, auto-hides when the
+  cursor leaves. Deliberately excludes GPU (no reliable system-wide counter) and
   network (no frame of reference at a glance).
+
+  ![Flyout: CPU / memory / disk](demo1.gif)
+  ![Flyout detail](demo2.gif)
 - **Theme aware** — black cat on light taskbars, white cat on dark ones;
   follows the system theme live (responds to `WM_SETTINGCHANGE`).
 - **Run at startup** — left-click the tray icon to toggle; confirmed by a
