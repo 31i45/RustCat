@@ -24,10 +24,19 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
   performance counter (fallback chain: `Processor Information` → `Processor`,
   `% Processor Utility` → `% Processor Time` on pre-26100 builds), smoothed
   over a rolling window.
+- **Temperature tint** — the cat's tint shifts from its theme colour toward red as
+  the CPU heats up: tinting starts at 60 °C and saturates at 90 °C across six
+  levels, with 2 °C hysteresis so a reading hovering on a boundary does not
+  flicker. The reading is the hottest thermal zone reported by PDH, converted from
+  Kelvin and smoothed over the same 5-sample window. Tint and theme are
+  orthogonal: each theme owns its own six-colour palette, and the level only
+  selects an entry. Where the counter does not exist (common on desktops and VMs)
+  the icon keeps the plain theme colour instead of faking a value.
 - **Hover flyout** — hovering the tray icon shows a compact panel with **CPU**,
-  **memory** and **disk** activity; per-monitor DPI aware, auto-hides when the
-  cursor leaves. Deliberately excludes GPU (no reliable system-wide counter) and
-  network (no frame of reference at a glance).
+  **memory**, **disk** and **temperature** activity (the temperature row is in °C
+  and reads `—` when the sensor is unavailable); per-monitor DPI aware,
+  auto-hides when the cursor leaves. Deliberately excludes GPU (no reliable
+  system-wide counter) and network (no frame of reference at a glance).
 
   ![Flyout detail](demo2.gif)
 - **Theme aware** — black cat on light taskbars, white cat on dark ones;
@@ -49,6 +58,12 @@ PDH sample (1 s) → rolling average → speed = max(1.0, load / 5.0)
 The busier your CPU, the faster the cat runs — and when the system is idle the
 animation deliberately slows down to ~2 fps, exactly like the original RunCat.
 
+A second branch samples `\Thermal Zone Information(*)\Temperature`, takes the
+hottest zone, converts Kelvin to Celsius and smooths it over the same rolling
+window. That value maps to one of six tint levels — 60 °C starts the shift,
+90 °C is full red — and the level only picks a colour from the current theme's
+palette; it never affects the frame rate.
+
 The five cat frames are baked into the executable at build time as raw BGRA
 pixels (no PNG decoding at runtime), and the `.exe` file icon is generated as a
 linker resource with zero external tooling.
@@ -69,7 +84,7 @@ The executable is at `target/release/rustcat.exe`.
 
 | Action              | Result                                          |
 | ------------------- | ----------------------------------------------- |
-| Hover the tray icon | Flyout: CPU / memory / disk activity            |
+| Hover the tray icon | Flyout: CPU / memory / disk / temperature       |
 | Left-click          | Toggle *Run at startup* (tooltip second line updates) |
 | Right-click         | Menu: **自启** (✓ = enabled), **退出**           |
 
@@ -86,6 +101,12 @@ Exit fully cleans up: tray icon, timers, icons and mutex — no leftovers.
   guards live in the unit-test suite, so CI runs them.
 - `VS_VERSIONINFO` is hand-assembled in `build.rs` with zero external tooling
   (structure verified via PE dump; property-sheet reading is a known open item).
+- Temperature tinting rewrites only RGB bytes and leaves alpha untouched, so the
+  baked silhouettes stay exact. Level 0 reuses the build-time baked icons and
+  creates no extra GDI objects; levels 1–5 are generated lazily per
+  `(theme, level)` pair, cached as HICONs and destroyed on exit. If the thermal
+  counter cannot be opened at all, the level stays 0 and the icon keeps its theme
+  colour — degradation over fabrication.
 
 ## Credits
 

@@ -7,6 +7,7 @@
 
 mod autostart;
 mod flyout;
+mod heat;
 mod icon;
 mod metrics;
 mod speed;
@@ -19,8 +20,12 @@ mod baked {
 }
 
 use flyout::{Flyout, IDT_HOVER};
+use heat::HeatStage;
 use icon::IconSet;
-use metrics::{cpu_sampler, disk_sampler, disk_activity, memory_pct, PdhCounter, RollingSampler};
+use metrics::{
+    cpu_sampler, disk_activity, disk_sampler, memory_pct, temp_sampler, PdhCounter, RollingSampler,
+    ThermalZoneCounter,
+};
 use speed::interval_ms;
 use theme::{Theme, system_theme};
 use tray::{CMD_AUTOSTART, CMD_EXIT, Tray, WM_TRAYICON};
@@ -42,6 +47,8 @@ pub const MAIN_CLASS: PCWSTR = w!("RustCatCoreWnd");
 struct App {
     sampler: RollingSampler<PdhCounter>,
     disk: RollingSampler<PdhCounter>,
+    temp: RollingSampler<ThermalZoneCounter>,
+    heat: HeatStage,
     tray: Tray,
     icons: IconSet,
     theme: Theme,
@@ -64,9 +71,13 @@ fn next_frame(i: usize) -> usize {
     (i + 1) % baked::FRAME_COUNT
 }
 
-/// 浮窗快照：CPU / 内存 / 磁盘，行序 = 心智优先级。数据源见 metrics 模块。
-fn flyout_snapshot(cpu: Option<f64>, disk_idle: Option<f64>) -> [Option<f64>; 3] {
-    [cpu, memory_pct().map(f64::from), disk_activity(disk_idle)]
+/// 浮窗快照：CPU / 内存 / 磁盘 / 温度，行序 = 心智优先级。数据源见 metrics 模块。
+fn flyout_snapshot(
+    cpu: Option<f64>,
+    temp: Option<f64>,
+    disk_idle: Option<f64>,
+) -> [Option<f64>; 4] {
+    [cpu, memory_pct().map(f64::from), disk_activity(disk_idle), temp]
 }
 
 /// 主题变更广播：lParam 为空（全量广播）或 "ImmersiveColorSet" 时响应。
@@ -88,13 +99,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if wp.0 == IDT_SAMPLE {
                 app.sampler.update();
                 app.disk.update();
+                app.temp.update();
+                app.heat.update(app.temp.load());
                 let load = app.sampler.load();
                 app.tray.set_tooltip(&tooltip_text(load, app.autostart));
-                app.flyout.refresh(flyout_snapshot(load, app.disk.load()));
+                app.flyout
+                    .refresh(flyout_snapshot(load, app.temp.load(), app.disk.load()));
                 SetTimer(Some(hwnd), IDT_ANIMATE, load.map_or(500, |v| interval_ms(v) as u32), None);
             } else if wp.0 == IDT_ANIMATE {
                 app.frame = next_frame(app.frame);
-                app.tray.set_icon(app.icons.frame(app.theme, app.frame));
+                app.tray
+                    .set_icon(app.icons.frame(app.theme, app.frame, app.heat.level()));
             } else if wp.0 == IDT_HOVER {
                 if !app.flyout.tick() {
                     app.flyout.hide();
@@ -105,7 +120,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_SETTINGCHANGE => {
             if theme_broadcast(lp) {
                 app.theme = system_theme();
-                app.tray.set_icon(app.icons.frame(app.theme, app.frame));
+                app.tray
+                    .set_icon(app.icons.frame(app.theme, app.frame, app.heat.level()));
                 app.flyout.set_dark(app.theme == Theme::Dark);
             }
             LRESULT(0)
@@ -192,13 +208,15 @@ fn main() {
             return;
         };
 
-        let Some(icons) = IconSet::create() else { return };
+        let Some(mut icons) = IconSet::create() else { return };
         let theme = system_theme();
-        let Some(tray) = Tray::add(hwnd, icons.frame(theme, 0), "RustCat") else { return };
+        let Some(tray) = Tray::add(hwnd, icons.frame(theme, 0, 0), "RustCat") else { return };
         let tray_hwnd = tray.hwnd(); // struct 字面量先 move tray，先取锚窗
         let app = Box::new(App {
             sampler: cpu_sampler(),
             disk: disk_sampler(),
+            temp: temp_sampler(),
+            heat: HeatStage::new(),
             tray,
             icons,
             theme,
@@ -271,7 +289,7 @@ mod tests {
     #[ignore = "真机手动验证"]
     fn probe_init_stages() {
         use super::*;
-        let icons = IconSet::create();
+        let mut icons = IconSet::create();
         println!("stage icons: {}", icons.is_some());
         unsafe {
             let hinstance = HINSTANCE::from(GetModuleHandleW(None).unwrap_or_default());
@@ -298,8 +316,8 @@ mod tests {
                 None,
             );
             println!("stage window: ok={}", hwnd.is_ok());
-            if let (Ok(hwnd), Some(ic)) = (hwnd, &icons) {
-                let tray = Tray::add(hwnd, ic.frame(system_theme(), 0), "probe");
+            if let (Ok(hwnd), Some(ic)) = (hwnd, &mut icons) {
+                let tray = Tray::add(hwnd, ic.frame(system_theme(), 0, 0), "probe");
                 println!("stage tray: {}", tray.is_some());
                 drop(tray);
                 let _ = DestroyWindow(hwnd);
@@ -432,13 +450,15 @@ mod tests {
                 None,
             )
             .expect("probe window");
-            let icons = IconSet::create().expect("icons");
+            let mut icons = IconSet::create().expect("icons");
             let theme = system_theme();
-            let tray = Tray::add(hwnd, icons.frame(theme, 0), "probe").expect("tray");
+            let tray = Tray::add(hwnd, icons.frame(theme, 0, 0), "probe").expect("tray");
             let tray_hwnd = tray.hwnd();
             let app = Box::new(App {
                 sampler: cpu_sampler(),
                 disk: RollingSampler::new(None),
+                temp: temp_sampler(),
+                heat: HeatStage::new(),
                 tray,
                 icons,
                 theme,

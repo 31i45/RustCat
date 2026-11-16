@@ -1,14 +1,16 @@
 //! 性能指标域：通用采样件（CounterSource 接缝 / 滑动窗口采样器 / PDH 薄封装）
-//! + 按指标分文件（cpu / disk / memory），命名即领域。
+//! + 按指标分文件（cpu / disk / memory / temp），命名即领域。
 //! 采样语义对齐原版 CPURepository.cs：构造预热、读数钳制、5 点滑动平均。
 
 mod cpu;
 mod disk;
 mod memory;
+mod temp;
 
 pub use cpu::cpu_sampler;
 pub use disk::{disk_activity, disk_sampler};
 pub use memory::memory_pct;
+pub use temp::{temp_sampler, ThermalZoneCounter};
 
 use crate::speed::RollingAverage;
 

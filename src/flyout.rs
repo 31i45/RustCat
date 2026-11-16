@@ -1,6 +1,6 @@
 //! 悬停浮窗：Win11 原生 flyout 审美（白/近黑圆角卡片 + DWM 投影，无边框线），
 //! 黑白灰单色 = 托盘猫视觉语言的延伸。
-//! 筛选（设计决策）：CPU / 内存 / 磁盘三项，行序 = 心智优先级；排除 GPU（无可靠
+//! 筛选（设计决策）：CPU / 内存 / 磁盘 / 温度四项，行序 = 心智优先级；排除 GPU（无可靠
 //! 系统级聚合源，假精度）与网络（速率无参照系，一瞥价值最低）。
 //! 字号分层：数值 15px Semibold（主视觉）、标签 11px Regular 灰（次级）。
 //! 行为：无激活、不进 Alt-Tab、Win11 圆角、250ms 光标哨兵自动隐藏、随采样周期刷新。
@@ -25,7 +25,7 @@ pub const IDT_HOVER: usize = 3; // 挂在主窗上的光标哨兵定时器
 // 96 DPI 基准布局常量（运行时按真实 DPI 缩放）。对齐系统原生托盘浮窗口径：
 // 紧凑宽度、Regular 字重（层级靠灰度而非字重）、细轨道、适中留白。
 const W: i32 = 200;
-const H: i32 = 120;
+const H: i32 = 154;
 const PAD: i32 = 14;
 const ROW_H: i32 = 34;
 const BAR_H: i32 = 3;
@@ -36,14 +36,24 @@ const GAP: i32 = 6; // 数值到条形的间距
 const ANCHOR_GAP: i32 = 8; // 浮窗与托盘图标的间距
 const ANCHOR_SLACK: i32 = 6; // 图标命中判定放宽（托盘小目标）
 
-const LABELS: [&str; 3] = ["CPU", "内存", "磁盘"];
+/// 行表：(标签, 单位)。行序 = 采样快照顺序。
+const ROWS: [(&str, &str); 4] = [("CPU", "%"), ("内存", "%"), ("磁盘", "%"), ("温度", "°C")];
+
+/// 第 index 行的显示文本：None → "—"，Some → 取整 + 该行单位后缀。
+fn value_text(index: usize, v: Option<f64>) -> String {
+    let (_, unit) = ROWS[index % ROWS.len()];
+    match v {
+        Some(x) => format!("{x:.0}{unit}"),
+        None => "—".to_string(),
+    }
+}
 
 /// 窗口 GWLP_USERDATA 载荷：绘制所需全部状态。
 struct Panel {
     value_font: HFONT,
     label_font: HFONT,
     dark: bool,
-    snapshot: [Option<f64>; 3],
+    snapshot: [Option<f64>; 4],
     scale: i32,
 }
 
@@ -145,7 +155,7 @@ impl Flyout {
     }
 
     /// 采样周期刷新：仅当浮窗可见时更新快照并重绘。
-    pub fn refresh(&self, snapshot: [Option<f64>; 3]) {
+    pub fn refresh(&self, snapshot: [Option<f64>; 4]) {
         let Some(h) = self.hwnd else { return };
         unsafe {
             if !IsWindowVisible(h).as_bool() {
@@ -199,7 +209,7 @@ impl Flyout {
                 value_font: create_font(VALUE_FONT, FW_NORMAL.0 as i32, scale),
                 label_font: create_font(LABEL_FONT, FW_NORMAL.0 as i32, scale),
                 dark: self.dark,
-                snapshot: [None; 3],
+                snapshot: [None; 4],
                 scale,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(panel) as isize);
@@ -235,7 +245,7 @@ unsafe extern "system" fn flyout_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
     }
 }
 
-/// 双缓冲自绘：卡片背景 + 三行（灰标签 | 大粗数值 | 全宽条形）。无边框，DWM 圆角裁切。
+/// 双缓冲自绘：卡片背景 + 四行（灰标签 | 大粗数值 | 全宽条形）。无边框，DWM 圆角裁切。
 unsafe fn paint(hwnd: HWND, p: &mut Panel) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(hwnd, &mut ps);
@@ -259,7 +269,7 @@ unsafe fn paint(hwnd: HWND, p: &mut Panel) {
     let gap = GAP * p.scale / 96;
     let inner = w - pad * 2;
 
-    for (i, name) in LABELS.iter().enumerate() {
+    for (i, (name, _)) in ROWS.iter().enumerate() {
         let top = pad + (i as i32) * row_h;
         // 标签：左，小灰字（次级信息）
         let _ = SelectObject(mem, p.label_font.into());
@@ -270,7 +280,7 @@ unsafe fn paint(hwnd: HWND, p: &mut Panel) {
         let _ = SetTextColor(mem, fg);
         let v = p.snapshot[i];
         let _ = SetTextAlign(mem, TA_RIGHT);
-        let s = v.map_or("—".to_string(), |x| format!("{x:.0}%"));
+        let s = value_text(i, v);
         text(mem, &s, w - pad, top);
         let _ = SetTextAlign(mem, TA_LEFT);
         // 条形：全宽轨道 + 单色值，与猫同色语言
@@ -388,4 +398,28 @@ fn in_rect(pt: POINT, r: RECT, slack: i32) -> bool {
         && pt.x <= r.right + slack
         && pt.y >= r.top - slack
         && pt.y <= r.bottom + slack
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_rows_use_percent_suffix() {
+        assert_eq!(value_text(0, Some(42.4)), "42%", "CPU 行应取整并带百分号");
+        assert_eq!(value_text(1, Some(7.6)), "8%", "内存行应取整并带百分号");
+        assert_eq!(value_text(2, Some(0.0)), "0%", "磁盘行应取整并带百分号");
+    }
+
+    #[test]
+    fn temp_row_uses_celsius_suffix() {
+        assert_eq!(value_text(3, Some(62.6)), "63°C", "温度行应取整并带 °C 后缀");
+        assert_eq!(value_text(3, Some(62.4)), "62°C", "温度行应取整并带 °C 后缀");
+    }
+
+    #[test]
+    fn missing_value_renders_dash() {
+        assert_eq!(value_text(3, None), "—", "温度不可用时应显示破折号");
+        assert_eq!(value_text(0, None), "—", "CPU 不可用时应显示破折号");
+    }
 }
