@@ -39,8 +39,9 @@ It is a Rust rewrite of the core of [RunCat365](https://github.com/kyome22/RunCa
   system-wide counter) and network (no frame of reference at a glance).
 
   ![Flyout detail](demo2.gif)
-- **Theme aware** — black cat on light taskbars, white cat on dark ones;
-  follows the system theme live (responds to `WM_SETTINGCHANGE`).
+- **Theme aware** — black cat on light taskbars, white cat on dark ones while it
+  is cool; the temperature tint shifts either base colour once the CPU heats up.
+  Follows the system theme live (responds to `WM_SETTINGCHANGE`).
 - **Run at startup** — left-click the tray icon to toggle; confirmed by a
   checked entry in the right-click menu and a permanent second line in the
   tooltip. Stored in the `HKCU` `Run` key, no settings file required.
