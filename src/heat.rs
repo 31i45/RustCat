@@ -17,13 +17,14 @@ const STEP_C: f64 = 6.0;
 const HYSTERESIS_C: f64 = 2.0;
 
 /// 浅色主题调色板：基线黑猫（#000000），暗红 → 亮红。
+/// 每一档的 R 增量保持在 ~25 左右：相邻档肉眼可辨（4 档与 5 档曾只差 9/8/3，等于退化 5 级）。
 const LIGHT_PALETTE: [[u8; 3]; LEVELS] = [
     [0x00, 0x00, 0x00],
     [0x7A, 0x1A, 0x12],
     [0x97, 0x20, 0x1A],
     [0xB3, 0x25, 0x1E],
     [0xC9, 0x2D, 0x24],
-    [0xD2, 0x35, 0x27],
+    [0xE1, 0x38, 0x2B],
 ];
 
 /// 深色主题调色板：基线白猫（#FFFFFF），淡暖粉 → 亮红。
@@ -200,5 +201,26 @@ mod tests {
     fn out_of_range_level_is_clamped() {
         assert_eq!(tint_color(Theme::Light, 6), tint_color(Theme::Light, 5), "越界档位应钳制到 5");
         assert_eq!(tint_color(Theme::Dark, 255), tint_color(Theme::Dark, 5), "越界档位应钳制到 5");
+    }
+
+    /// 相邻档必须肉眼可辨：RGB 欧氏距离过近等于档位白给（4 档曾与 5 档只差 9/8/3）。
+    fn rgb_dist(a: [u8; 3], b: [u8; 3]) -> f64 {
+        let d = |i: usize| f64::from(i32::from(a[i]) - i32::from(b[i]));
+        (d(0) * d(0) + d(1) * d(1) + d(2) * d(2)).sqrt()
+    }
+
+    #[test]
+    fn adjacent_levels_are_perceptibly_distinct() {
+        for theme in [Theme::Light, Theme::Dark] {
+            for l in 1..LEVELS as u8 {
+                let (a, b) = (tint_color(theme, l - 1), tint_color(theme, l));
+                let d = rgb_dist(a, b);
+                assert!(
+                    d >= 20.0,
+                    "{theme:?} 主题档位 {} 与 {l} 色差仅 {d:.1}（<20），肉眼几乎不可辨",
+                    l - 1
+                );
+            }
+        }
     }
 }
