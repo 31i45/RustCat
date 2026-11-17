@@ -1,16 +1,16 @@
 //! 性能指标域：通用采样件（CounterSource 接缝 / 滑动窗口采样器 / PDH 薄封装）
-//! + 按指标分文件（cpu / disk / memory / temp），命名即领域。
+//! + 按指标分文件（cpu / disk / memory / cpu_temp），命名即领域。
 //! 采样语义对齐原版 CPURepository.cs：构造预热、读数钳制、5 点滑动平均。
 
 mod cpu;
+mod cpu_temp;
 mod disk;
 mod memory;
-mod temp;
 
 pub use cpu::cpu_sampler;
+pub use cpu_temp::{cpu_temp_sampler, PawnCpu};
 pub use disk::{disk_activity, disk_sampler};
 pub use memory::memory_pct;
-pub use temp::{temp_sampler, ThermalZoneCounter};
 
 use crate::speed::RollingAverage;
 
@@ -23,15 +23,22 @@ pub trait CounterSource {
 pub struct RollingSampler<S: CounterSource> {
     source: Option<S>,
     window: RollingAverage,
+    /// 钳制上限：CPU/磁盘是百分比（100），温度是摄氏度上限（120）。
+    max: f64,
 }
 
 impl<S: CounterSource> RollingSampler<S> {
     /// PDH 首次读数恒为 0，构造即丢弃（原版构造预热语义）。
-    pub fn new(mut source: Option<S>) -> Self {
+    pub fn new(source: Option<S>) -> Self {
+        Self::capped(source, 100.0)
+    }
+
+    /// 同上，但钳制上限按指标可配置（温度不是百分比）。
+    pub fn capped(mut source: Option<S>, max: f64) -> Self {
         if let Some(s) = &mut source {
             s.next_value();
         }
-        Self { source, window: RollingAverage::default() }
+        Self { source, window: RollingAverage::default(), max }
     }
 
     #[allow(dead_code)] // 探针与单测使用；主循环只消费 load()
@@ -41,7 +48,7 @@ impl<S: CounterSource> RollingSampler<S> {
 
     pub fn update(&mut self) {
         if let Some(v) = self.source.as_mut().and_then(CounterSource::next_value) {
-            self.window.push(v.clamp(0.0, 100.0));
+            self.window.push(v.clamp(0.0, self.max));
         }
     }
 
@@ -139,6 +146,12 @@ mod tests {
         let mut s = RollingSampler::new(Some(Mock::new(&[Some(0.0), Some(250.0)])));
         s.update();
         assert_eq!(s.load(), Some(100.0));
+    }
+    #[test]
+    fn temperature_cap_exceeds_hundred() {
+        let mut s = RollingSampler::capped(Some(Mock::new(&[Some(0.0), Some(103.0)])), 120.0);
+        s.update();
+        assert_eq!(s.load(), Some(103.0), "温度不应被百分比的 100 上限截断");
     }
     #[test]
     fn window_slides_over_five() {

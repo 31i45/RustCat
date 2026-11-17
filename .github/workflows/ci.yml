@@ -28,13 +28,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustcat
-          path: target/release/rustcat.exe
-
   # 打 v* tag 即发布：测试全绿（needs: build）后，锁定依赖重建并挂到 GitHub Release。
+  # 发布物只有裸 exe，不打 zip——用户下载即可运行。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build

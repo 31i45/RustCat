@@ -23,8 +23,8 @@ use flyout::{Flyout, IDT_HOVER};
 use heat::HeatStage;
 use icon::IconSet;
 use metrics::{
-    cpu_sampler, disk_activity, disk_sampler, memory_pct, temp_sampler, PdhCounter, RollingSampler,
-    ThermalZoneCounter,
+    cpu_sampler, cpu_temp_sampler, disk_activity, disk_sampler, memory_pct, PawnCpu, PdhCounter,
+    RollingSampler,
 };
 use speed::interval_ms;
 use theme::{Theme, system_theme};
@@ -47,7 +47,7 @@ pub const MAIN_CLASS: PCWSTR = w!("RustCatCoreWnd");
 struct App {
     sampler: RollingSampler<PdhCounter>,
     disk: RollingSampler<PdhCounter>,
-    temp: RollingSampler<ThermalZoneCounter>,
+    temp: RollingSampler<PawnCpu>,
     heat: HeatStage,
     tray: Tray,
     icons: IconSet,
@@ -100,11 +100,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 app.sampler.update();
                 app.disk.update();
                 app.temp.update();
-                app.heat.update(app.temp.load());
                 let load = app.sampler.load();
+                let temp = app.temp.load();
+                app.heat.update(temp);
                 app.tray.set_tooltip(&tooltip_text(load, app.autostart));
-                app.flyout
-                    .refresh(flyout_snapshot(load, app.temp.load(), app.disk.load()));
+                app.flyout.refresh(flyout_snapshot(load, temp, app.disk.load()));
                 SetTimer(Some(hwnd), IDT_ANIMATE, load.map_or(500, |v| interval_ms(v) as u32), None);
             } else if wp.0 == IDT_ANIMATE {
                 app.frame = next_frame(app.frame);
@@ -215,7 +215,7 @@ fn main() {
         let app = Box::new(App {
             sampler: cpu_sampler(),
             disk: disk_sampler(),
-            temp: temp_sampler(),
+            temp: cpu_temp_sampler(),
             heat: HeatStage::new(),
             tray,
             icons,
@@ -457,7 +457,7 @@ mod tests {
             let app = Box::new(App {
                 sampler: cpu_sampler(),
                 disk: RollingSampler::new(None),
-                temp: temp_sampler(),
+                temp: cpu_temp_sampler(),
                 heat: HeatStage::new(),
                 tray,
                 icons,
