@@ -74,7 +74,9 @@ fn gen_exe_icon_res(out_dir: &str) {
     group.extend_from_slice(&(png.len() as u32).to_le_bytes()); // bytes in res
     group.extend_from_slice(&1u16.to_le_bytes()); // 引用 RT_ICON id=1
     push_res_entry(&mut res, 14, 1, 0x1030, 0, &group); // RT_GROUP_ICON
-    push_res_entry(&mut res, 16, 1, 0x1030, 1, &vs_versioninfo()); // RT_VERSION（DataVersion=1）
+    let version = parse_version(&env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION"));
+    let info = vs_versioninfo(&version);
+    push_res_entry(&mut res, 16, 1, 0x1030, 1, &info); // RT_VERSION（DataVersion=1）
     let path = Path::new(out_dir).join("rustcat.res");
     fs::write(&path, &res).expect("write rustcat.res");
     println!("cargo:rustc-link-arg-bins={}", path.display());
@@ -94,18 +96,20 @@ fn pad4(buf: &mut Vec<u8>) {
     }
 }
 
-/// 通用节点：wLength（整块，含 6 字节头）/ wValueLength / wType / szKey(+pad) / value / children。
+/// 通用节点：wLength（整块，含 6 字节头）/ wValueLength / wType / szKey(+NUL)(+pad) / value / children。
 /// 对齐基准含 6 字节头：szKey 后 pad 使 value 落在 4 对齐处；value 必须自身 4 对齐。
-fn make_block(key: &str, value: &[u8], wtype: u16, children: &[u8]) -> Vec<u8> {
+/// wValueLength 单独给：字符串值的尾部补零不算长度，否则 Windows 解析器视为非法块。
+fn make_block(key: &str, value: &[u8], value_len: u16, wtype: u16, children: &[u8]) -> Vec<u8> {
     let mut sz = Vec::new();
     push_wstr(&mut sz, key);
+    sz.extend_from_slice(&0u16.to_le_bytes()); // szKey 必须以 NUL 结尾
     while (6 + sz.len()) % 4 != 0 {
         sz.push(0);
     }
     let total = 6 + sz.len() + value.len() + children.len();
     let mut b = Vec::with_capacity(total);
     b.extend_from_slice(&(total as u16).to_le_bytes());
-    b.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    b.extend_from_slice(&value_len.to_le_bytes());
     b.extend_from_slice(&wtype.to_le_bytes());
     b.extend_from_slice(&sz);
     b.extend_from_slice(value);
@@ -118,24 +122,39 @@ fn push_child(children: &mut Vec<u8>, child: Vec<u8>) {
     children.extend_from_slice(&child);
 }
 
-/// 字符串条目：value = UTF-16 + NUL，pad 到 4 对齐（wValueLength 为含 NUL 的字节数）。
+/// 字符串条目：value = UTF-16 + NUL，pad 到 4 对齐（wValueLength 只算到 NUL，不含补零）。
 fn make_string(key: &str, val: &str) -> Vec<u8> {
     let mut value = Vec::new();
     push_wstr(&mut value, val);
     value.extend_from_slice(&0u16.to_le_bytes());
+    let value_len = value.len() as u16;
     pad4(&mut value);
-    make_block(key, &value, 1, &[])
+    make_block(key, &value, value_len, 1, &[])
 }
 
-/// 0.1.0.0 → FileVersion/ProductVersion；VOS_NT_WINDOWS32 + VFT_APP。
-fn vs_versioninfo() -> Vec<u8> {
+/// "1.2.0" → [1, 2, 0, 0]；缺省段补 0，预发布/构建后缀（-beta.1、+sha）忽略。
+fn parse_version(v: &str) -> [u16; 4] {
+    let mut out = [0u16; 4];
+    for (i, part) in v.split('.').take(4).enumerate() {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        assert!(!digits.is_empty(), "Cargo.toml version {v:?} 第 {i} 段非数字");
+        out[i] = digits.parse().unwrap_or_else(|e| panic!("parse version {v:?}: {e}"));
+    }
+    out
+}
+
+/// Cargo.toml 的 version/description/license/name → FileVersion/ProductVersion；VOS_NT_WINDOWS32 + VFT_APP。
+fn vs_versioninfo(version: &[u16; 4]) -> Vec<u8> {
+    let [major, minor, patch, build] = *version;
+    let file_ms = (u32::from(major) << 16) | u32::from(minor);
+    let file_ls = (u32::from(patch) << 16) | u32::from(build);
     let words: [u32; 13] = [
         0xFEEF_04BD, // dwSignature
         0x0001_0000, // dwStrucVersion
-        0x0001_0000, // dwFileVersionMS = 1.0
-        0,           // dwFileVersionLS = 0.0
-        0x0001_0000, // dwProductVersionMS = 1.0
-        0,           // dwProductVersionLS = 0.0
+        file_ms,     // dwFileVersionMS
+        file_ls,     // dwFileVersionLS
+        file_ms,     // dwProductVersionMS
+        file_ls,     // dwProductVersionLS
         0x0000_003F, // dwFileFlagsMask
         0,           // dwFileFlags
         0x0004_0004, // dwFileOS = VOS_NT_WINDOWS32
@@ -146,34 +165,37 @@ fn vs_versioninfo() -> Vec<u8> {
     ];
     let ffi: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
 
+    let version_text = format!("{major}.{minor}.{patch}");
+    let license = env::var("CARGO_PKG_LICENSE").unwrap_or_default();
+    let copyright = if license.is_empty() { String::new() } else { format!("{license} License") };
     let mut strings = Vec::new();
     for (k, v) in [
-        ("CompanyName", "31i45"),
-        ("FileDescription", "A running cat on your taskbar"),
-        ("FileVersion", "1.0.0"),
-        ("InternalName", "rustcat"),
-        ("LegalCopyright", "MIT License"),
-        ("OriginalFilename", "rustcat.exe"),
-        ("ProductName", "RustCat"),
-        ("ProductVersion", "1.0.0"),
+        ("CompanyName", "31i45".to_string()),
+        ("FileDescription", env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default()),
+        ("FileVersion", version_text.clone()),
+        ("InternalName", env::var("CARGO_PKG_NAME").unwrap_or_default()),
+        ("LegalCopyright", copyright),
+        ("OriginalFilename", format!("{}.exe", env::var("CARGO_PKG_NAME").unwrap_or_default())),
+        ("ProductName", "RustCat".to_string()),
+        ("ProductVersion", version_text),
     ] {
-        push_child(&mut strings, make_string(k, v));
+        push_child(&mut strings, make_string(k, &v));
     }
-    let table = make_block("040904b0", &[], 1, &strings); // US English + Unicode
+    let table = make_block("040904b0", &[], 0, 1, &strings); // US English + Unicode
     let mut sfi = Vec::new();
     push_child(&mut sfi, table);
-    let sfi = make_block("StringFileInfo", &[], 1, &sfi);
+    let sfi = make_block("StringFileInfo", &[], 0, 1, &sfi);
 
     let mut translation = 0x0409u16.to_le_bytes().to_vec();
     translation.extend_from_slice(&0x04B0u16.to_le_bytes());
     let mut vfi = Vec::new();
-    push_child(&mut vfi, make_block("Translation", &translation, 0, &[]));
-    let vfi = make_block("VarFileInfo", &[], 0, &vfi);
+    push_child(&mut vfi, make_block("Translation", &translation, 4, 0, &[]));
+    let vfi = make_block("VarFileInfo", &[], 0, 0, &vfi);
 
     let mut children = Vec::new();
     push_child(&mut children, sfi);
     push_child(&mut children, vfi);
-    make_block("VS_VERSION_INFO", &ffi, 0, &children)
+    make_block("VS_VERSION_INFO", &ffi, ffi.len() as u16, 0, &children)
 }
 
 /// .res 条目：32 字节头（DataSize/HeaderSize/Type/Name/DataVersion/Flags/Lang/Ver/Char）+ DWORD 对齐数据。
